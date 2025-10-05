@@ -1,5 +1,7 @@
 package com.orion.downloader.core
 
+import android.content.Context
+import com.orion.downloader.util.StorageHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -12,7 +14,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import kotlin.math.min
 
-class HttpDownloadEngine {
+class HttpDownloadEngine(private val context: Context) {
     
     @Volatile
     private var isDownloading = false
@@ -20,6 +22,8 @@ class HttpDownloadEngine {
     private var isPaused = false
     @Volatile
     private var shouldCancel = false
+    
+    private var currentFileInfo: StorageHelper.DownloadFileInfo? = null
     
     data class DownloadProgress(
         val downloadedBytes: Long,
@@ -37,7 +41,7 @@ class HttpDownloadEngine {
     
     suspend fun startDownload(
         url: String,
-        outputPath: String,
+        filename: String,
         numConnections: Int = 8,
         progressCallback: ProgressCallback? = null
     ): Boolean = withContext(Dispatchers.IO) {
@@ -64,55 +68,80 @@ class HttpDownloadEngine {
             val actualConnections = if (supportsRanges) min(numConnections, 16) else 1
             val chunkSize = contentLength / actualConnections
             
-            val outputFile = File(outputPath)
-            outputFile.parentFile?.mkdirs()
+            val mimeType = StorageHelper.getMimeType(filename)
+            val fileInfo = StorageHelper.createDownloadFile(context, filename, mimeType)
+            currentFileInfo = fileInfo
             
-            RandomAccessFile(outputFile, "rw").use { raf ->
+            if (fileInfo.tempFile == null) {
+                isDownloading = false
+                return@withContext false
+            }
+            
+            RandomAccessFile(fileInfo.tempFile, "rw").use { raf ->
                 raf.setLength(contentLength)
             }
             
             val startTime = System.currentTimeMillis()
             val totalDownloaded = java.util.concurrent.atomic.AtomicLong(0L)
             
-            coroutineScope {
-                val jobs = (0 until actualConnections).map { i ->
-                    async {
-                        val start = i * chunkSize
-                        val end = if (i == actualConnections - 1) contentLength - 1 else start + chunkSize - 1
-                        
-                        downloadChunk(
-                            url = url,
-                            outputFile = outputFile,
-                            start = start,
-                            end = end,
-                            onProgress = { downloaded ->
-                                if (!isPaused && !shouldCancel) {
-                                    val total = totalDownloaded.addAndGet(downloaded)
-                                    val elapsed = (System.currentTimeMillis() - startTime) / 1000.0
-                                    val speed = if (elapsed > 0) total / elapsed else 0.0
-                                    
-                                    progressCallback?.onProgress(
-                                        DownloadProgress(
-                                            downloadedBytes = total,
-                                            totalBytes = contentLength,
-                                            speedBps = speed,
-                                            activeConnections = actualConnections
+            var downloadSuccess = false
+            
+            try {
+                coroutineScope {
+                    val jobs = (0 until actualConnections).map { i ->
+                        async {
+                            val start = i * chunkSize
+                            val end = if (i == actualConnections - 1) contentLength - 1 else start + chunkSize - 1
+                            
+                            downloadChunk(
+                                url = url,
+                                outputFile = fileInfo.tempFile,
+                                start = start,
+                                end = end,
+                                onProgress = { downloaded ->
+                                    if (!isPaused && !shouldCancel) {
+                                        val total = totalDownloaded.addAndGet(downloaded)
+                                        val elapsed = (System.currentTimeMillis() - startTime) / 1000.0
+                                        val speed = if (elapsed > 0) total / elapsed else 0.0
+                                        
+                                        progressCallback?.onProgress(
+                                            DownloadProgress(
+                                                downloadedBytes = total,
+                                                totalBytes = contentLength,
+                                                speedBps = speed,
+                                                activeConnections = actualConnections
+                                            )
                                         )
-                                    )
+                                    }
                                 }
-                            }
-                        )
+                            )
+                        }
                     }
+                    
+                    jobs.awaitAll()
                 }
                 
-                jobs.awaitAll()
+                downloadSuccess = !shouldCancel
+                
+            } catch (e: Exception) {
+                e.printStackTrace()
+                downloadSuccess = false
             }
             
+            if (downloadSuccess) {
+                StorageHelper.finishDownload(context, fileInfo)
+            } else {
+                StorageHelper.cancelDownload(context, fileInfo)
+            }
+            
+            currentFileInfo = null
             isDownloading = false
-            return@withContext !shouldCancel
+            return@withContext downloadSuccess
             
         } catch (e: Exception) {
             e.printStackTrace()
+            currentFileInfo?.let { StorageHelper.cancelDownload(context, it) }
+            currentFileInfo = null
             isDownloading = false
             return@withContext false
         }
@@ -129,6 +158,13 @@ class HttpDownloadEngine {
     fun cancelDownload() {
         shouldCancel = true
         isPaused = false
+        currentFileInfo?.let { 
+            try {
+                StorageHelper.cancelDownload(context, it)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
     
     fun isDownloading() = isDownloading
@@ -141,8 +177,11 @@ class HttpDownloadEngine {
         end: Long,
         onProgress: (Long) -> Unit
     ) = withContext(Dispatchers.IO) {
+        var connection: HttpURLConnection? = null
+        var raf: RandomAccessFile? = null
+        
         try {
-            val connection = URL(url).openConnection() as HttpURLConnection
+            connection = URL(url).openConnection() as HttpURLConnection
             connection.requestMethod = "GET"
             connection.setRequestProperty("Range", "bytes=$start-$end")
             connection.connectTimeout = 10000
@@ -150,7 +189,7 @@ class HttpDownloadEngine {
             connection.connect()
             
             val inputStream = connection.inputStream
-            val raf = RandomAccessFile(outputFile, "rw")
+            raf = RandomAccessFile(outputFile, "rw")
             raf.seek(start)
             
             val buffer = ByteArray(8192)
@@ -161,6 +200,8 @@ class HttpDownloadEngine {
                     delay(100)
                 }
                 
+                if (shouldCancel) break
+                
                 bytesRead = inputStream.read(buffer)
                 if (bytesRead == -1) break
                 
@@ -168,12 +209,15 @@ class HttpDownloadEngine {
                 onProgress(bytesRead.toLong())
             }
             
-            raf.close()
-            inputStream.close()
-            connection.disconnect()
-            
         } catch (e: Exception) {
             e.printStackTrace()
+        } finally {
+            try {
+                raf?.close()
+                connection?.disconnect()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
     }
 }

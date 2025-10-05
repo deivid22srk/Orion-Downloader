@@ -93,7 +93,6 @@ class DownloadViewModel(application: Application) : AndroidViewModel(application
             downloadService?.startDownload(
                 downloadId = itemId,
                 url = item.url,
-                outputPath = item.outputPath,
                 filename = item.filename,
                 numConnections = item.numConnections,
                 onProgress = { downloadedBytes, totalBytes, speedBps ->

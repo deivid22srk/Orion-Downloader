@@ -51,7 +51,6 @@ class DownloadService : Service() {
     fun startDownload(
         downloadId: String,
         url: String,
-        outputPath: String,
         filename: String,
         numConnections: Int,
         onProgress: (Long, Long, Double) -> Unit,
@@ -62,7 +61,7 @@ class DownloadService : Service() {
             return
         }
         
-        val engine = HttpDownloadEngine()
+        val engine = HttpDownloadEngine(this)
         activeDownloads[downloadId] = engine
         activeDownloadCount++
         
@@ -70,7 +69,7 @@ class DownloadService : Service() {
             try {
                 val success = engine.startDownload(
                     url = url,
-                    outputPath = outputPath,
+                    filename = filename,
                     numConnections = numConnections,
                     progressCallback = object : HttpDownloadEngine.ProgressCallback {
                         override fun onProgress(progress: HttpDownloadEngine.DownloadProgress) {
