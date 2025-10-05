@@ -12,6 +12,8 @@
 #include <fstream>
 #include <chrono>
 #include <algorithm>
+#include <openssl/ssl.h>
+#include <openssl/err.h>
 
 #define LOG_TAG "OrionDownloader"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -21,7 +23,59 @@ namespace orion {
 
 constexpr size_t BUFFER_SIZE = 65536;
 constexpr int CONNECT_TIMEOUT = 10;
-constexpr int READ_TIMEOUT = 30;
+
+static bool g_ssl_initialized = false;
+
+void initializeSSL() {
+    if (!g_ssl_initialized) {
+        SSL_library_init();
+        SSL_load_error_strings();
+        OpenSSL_add_all_algorithms();
+        g_ssl_initialized = true;
+        LOGD("OpenSSL initialized");
+    }
+}
+
+struct ConnectionHandle {
+    int sockfd = -1;
+    SSL* ssl = nullptr;
+    SSL_CTX* ctx = nullptr;
+    bool is_https = false;
+    
+    ~ConnectionHandle() {
+        close();
+    }
+    
+    void close() {
+        if (ssl) {
+            SSL_shutdown(ssl);
+            SSL_free(ssl);
+            ssl = nullptr;
+        }
+        if (ctx) {
+            SSL_CTX_free(ctx);
+            ctx = nullptr;
+        }
+        if (sockfd >= 0) {
+            ::close(sockfd);
+            sockfd = -1;
+        }
+    }
+    
+    ssize_t send(const void* buf, size_t len) {
+        if (is_https && ssl) {
+            return SSL_write(ssl, buf, len);
+        }
+        return ::send(sockfd, buf, len, MSG_NOSIGNAL);
+    }
+    
+    ssize_t recv(void* buf, size_t len) {
+        if (is_https && ssl) {
+            return SSL_read(ssl, buf, len);
+        }
+        return ::recv(sockfd, buf, len, 0);
+    }
+};
 
 DownloadEngine::DownloadEngine()
     : is_downloading_(false)
@@ -31,15 +85,22 @@ DownloadEngine::DownloadEngine()
     , downloaded_bytes_(0)
     , current_speed_(0.0)
     , num_connections_(8) {
+    initializeSSL();
 }
 
 DownloadEngine::~DownloadEngine() {
     cancelDownload();
 }
 
-static std::string parseUrl(const std::string& url, std::string& host, std::string& path, int& port, bool& is_https) {
+static bool parseUrl(const std::string& url, std::string& host, std::string& path, 
+                     int& port, bool& is_https) {
     is_https = (url.find("https://") == 0);
     size_t start = is_https ? 8 : 7;
+    
+    if (url.length() <= start) {
+        return false;
+    }
+    
     port = is_https ? 443 : 80;
     
     size_t path_pos = url.find('/', start);
@@ -57,30 +118,33 @@ static std::string parseUrl(const std::string& url, std::string& host, std::stri
         host = host.substr(0, port_pos);
     }
     
-    return host;
+    return true;
 }
 
-static int createConnection(const std::string& host, int port) {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
+static std::unique_ptr<ConnectionHandle> createConnection(const std::string& host, 
+                                                           int port, bool is_https) {
+    auto handle = std::make_unique<ConnectionHandle>();
+    handle->is_https = is_https;
+    
+    handle->sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (handle->sockfd < 0) {
         LOGE("Failed to create socket");
-        return -1;
+        return nullptr;
     }
 
     struct timeval timeout;
     timeout.tv_sec = CONNECT_TIMEOUT;
     timeout.tv_usec = 0;
-    setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    setsockopt(handle->sockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(handle->sockfd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
     int flag = 1;
-    setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+    setsockopt(handle->sockfd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 
     struct hostent* server = gethostbyname(host.c_str());
     if (server == nullptr) {
         LOGE("Failed to resolve host: %s", host.c_str());
-        close(sockfd);
-        return -1;
+        return nullptr;
     }
 
     struct sockaddr_in serv_addr;
@@ -89,20 +153,45 @@ static int createConnection(const std::string& host, int port) {
     memcpy(&serv_addr.sin_addr.s_addr, server->h_addr, server->h_length);
     serv_addr.sin_port = htons(port);
 
-    if (connect(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
+    if (connect(handle->sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
         LOGE("Failed to connect to %s:%d", host.c_str(), port);
-        close(sockfd);
-        return -1;
+        return nullptr;
     }
 
-    return sockfd;
+    if (is_https) {
+        handle->ctx = SSL_CTX_new(TLS_client_method());
+        if (!handle->ctx) {
+            LOGE("Failed to create SSL context");
+            return nullptr;
+        }
+
+        SSL_CTX_set_options(handle->ctx, SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3);
+        SSL_CTX_set_verify(handle->ctx, SSL_VERIFY_NONE, nullptr);
+
+        handle->ssl = SSL_new(handle->ctx);
+        if (!handle->ssl) {
+            LOGE("Failed to create SSL structure");
+            return nullptr;
+        }
+
+        SSL_set_fd(handle->ssl, handle->sockfd);
+
+        if (SSL_connect(handle->ssl) != 1) {
+            LOGE("SSL handshake failed: %s", ERR_error_string(ERR_get_error(), nullptr));
+            return nullptr;
+        }
+
+        LOGD("SSL connection established successfully");
+    }
+
+    return handle;
 }
 
-static bool sendRequest(int sockfd, const std::string& request) {
+static bool sendRequest(ConnectionHandle* handle, const std::string& request) {
     size_t total_sent = 0;
     while (total_sent < request.length()) {
-        ssize_t sent = send(sockfd, request.c_str() + total_sent, 
-                           request.length() - total_sent, MSG_NOSIGNAL);
+        ssize_t sent = handle->send(request.c_str() + total_sent, 
+                                     request.length() - total_sent);
         if (sent <= 0) {
             LOGE("Failed to send request");
             return false;
@@ -112,17 +201,21 @@ static bool sendRequest(int sockfd, const std::string& request) {
     return true;
 }
 
-static std::string receiveHeaders(int sockfd) {
+static std::string receiveHeaders(ConnectionHandle* handle) {
     std::string headers;
     char buffer[1];
     std::string delimiter = "\r\n\r\n";
     
     while (headers.find(delimiter) == std::string::npos) {
-        ssize_t received = recv(sockfd, buffer, 1, 0);
+        ssize_t received = handle->recv(buffer, 1);
         if (received <= 0) {
             break;
         }
         headers += buffer[0];
+        
+        if (headers.length() > 16384) {
+            break;
+        }
     }
     
     return headers;
@@ -132,34 +225,32 @@ int64_t DownloadEngine::getContentLength(const std::string& url) {
     std::string host, path;
     int port;
     bool is_https;
-    parseUrl(url, host, path, port, is_https);
-
-    if (is_https) {
-        LOGD("HTTPS not fully supported in basic implementation, using HTTP");
+    
+    if (!parseUrl(url, host, path, port, is_https)) {
+        LOGE("Failed to parse URL");
         return -1;
     }
 
-    int sockfd = createConnection(host, port);
-    if (sockfd < 0) return -1;
+    auto handle = createConnection(host, port, is_https);
+    if (!handle) {
+        return -1;
+    }
 
     std::ostringstream request;
     request << "HEAD " << path << " HTTP/1.1\r\n"
             << "Host: " << host << "\r\n"
+            << "User-Agent: Orion-Downloader/1.0\r\n"
             << "Connection: close\r\n"
             << "\r\n";
 
-    if (!sendRequest(sockfd, request.str())) {
-        close(sockfd);
+    if (!sendRequest(handle.get(), request.str())) {
         return -1;
     }
 
-    std::string headers = receiveHeaders(sockfd);
-    close(sockfd);
-
-    size_t pos = headers.find("Content-Length:");
-    if (pos == std::string::npos) {
-        pos = headers.find("content-length:");
-    }
+    std::string headers = receiveHeaders(handle.get());
+    
+    std::transform(headers.begin(), headers.end(), headers.begin(), ::tolower);
+    size_t pos = headers.find("content-length:");
     
     if (pos != std::string::npos) {
         size_t end = headers.find("\r\n", pos);
@@ -175,29 +266,31 @@ bool DownloadEngine::supportsRangeRequests(const std::string& url) {
     std::string host, path;
     int port;
     bool is_https;
-    parseUrl(url, host, path, port, is_https);
+    
+    if (!parseUrl(url, host, path, port, is_https)) {
+        return false;
+    }
 
-    if (is_https) return false;
-
-    int sockfd = createConnection(host, port);
-    if (sockfd < 0) return false;
+    auto handle = createConnection(host, port, is_https);
+    if (!handle) {
+        return false;
+    }
 
     std::ostringstream request;
     request << "HEAD " << path << " HTTP/1.1\r\n"
             << "Host: " << host << "\r\n"
+            << "User-Agent: Orion-Downloader/1.0\r\n"
             << "Connection: close\r\n"
             << "\r\n";
 
-    if (!sendRequest(sockfd, request.str())) {
-        close(sockfd);
+    if (!sendRequest(handle.get(), request.str())) {
         return false;
     }
 
-    std::string headers = receiveHeaders(sockfd);
-    close(sockfd);
+    std::string headers = receiveHeaders(handle.get());
+    std::transform(headers.begin(), headers.end(), headers.begin(), ::tolower);
 
-    return headers.find("Accept-Ranges: bytes") != std::string::npos ||
-           headers.find("accept-ranges: bytes") != std::string::npos;
+    return headers.find("accept-ranges: bytes") != std::string::npos;
 }
 
 bool DownloadEngine::initializeDownload(const std::string& url) {
@@ -213,8 +306,9 @@ bool DownloadEngine::initializeDownload(const std::string& url) {
     bool supports_ranges = supportsRangeRequests(url);
     int actual_connections = supports_ranges ? num_connections_ : 1;
 
-    LOGD("Content length: %lld bytes, Connections: %d", 
-         (long long)content_length, actual_connections);
+    LOGD("Content length: %lld bytes, Connections: %d, HTTPS: %s", 
+         (long long)content_length, actual_connections,
+         url.find("https://") == 0 ? "YES" : "NO");
 
     chunks_.clear();
     
@@ -241,7 +335,11 @@ void DownloadEngine::downloadChunk(int chunk_id, const std::string& url,
     std::string host, path;
     int port;
     bool is_https;
-    parseUrl(url, host, path, port, is_https);
+    
+    if (!parseUrl(url, host, path, port, is_https)) {
+        LOGE("Failed to parse URL for chunk %d", chunk_id);
+        return;
+    }
 
     std::string temp_file = output_path + ".part" + std::to_string(chunk_id);
     std::ofstream out(temp_file, std::ios::binary);
@@ -250,8 +348,8 @@ void DownloadEngine::downloadChunk(int chunk_id, const std::string& url,
         return;
     }
 
-    int sockfd = createConnection(host, port);
-    if (sockfd < 0) {
+    auto handle = createConnection(host, port, is_https);
+    if (!handle) {
         out.close();
         return;
     }
@@ -259,17 +357,17 @@ void DownloadEngine::downloadChunk(int chunk_id, const std::string& url,
     std::ostringstream request;
     request << "GET " << path << " HTTP/1.1\r\n"
             << "Host: " << host << "\r\n"
+            << "User-Agent: Orion-Downloader/1.0\r\n"
             << "Range: bytes=" << chunk.start << "-" << chunk.end << "\r\n"
             << "Connection: close\r\n"
             << "\r\n";
 
-    if (!sendRequest(sockfd, request.str())) {
-        close(sockfd);
+    if (!sendRequest(handle.get(), request.str())) {
         out.close();
         return;
     }
 
-    std::string headers = receiveHeaders(sockfd);
+    std::string headers = receiveHeaders(handle.get());
     
     char buffer[BUFFER_SIZE];
     auto start_time = std::chrono::steady_clock::now();
@@ -280,7 +378,7 @@ void DownloadEngine::downloadChunk(int chunk_id, const std::string& url,
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        ssize_t received = recv(sockfd, buffer, BUFFER_SIZE, 0);
+        ssize_t received = handle->recv(buffer, BUFFER_SIZE);
         if (received <= 0) break;
 
         out.write(buffer, received);
@@ -300,10 +398,11 @@ void DownloadEngine::downloadChunk(int chunk_id, const std::string& url,
         if (progress_callback_ && elapsed > 100) {
             DownloadProgress progress = getProgress();
             progress_callback_(progress);
+            start_time = current_time;
+            chunk_downloaded = 0;
         }
     }
 
-    close(sockfd);
     out.close();
 
     if (!should_cancel_.load()) {

@@ -14,9 +14,14 @@ add_library(
     jni_bridge.cpp
 )
 
+find_library(ssl-lib ssl)
+find_library(crypto-lib crypto)
+
 target_link_libraries(
     orion_downloader
     android
     log
     z
+    ${ssl-lib}
+    ${crypto-lib}
 )
