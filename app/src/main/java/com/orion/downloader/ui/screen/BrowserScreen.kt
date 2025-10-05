@@ -23,9 +23,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.orion.downloader.viewmodel.DownloadViewModel
-import java.net.URLDecoder
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BrowserScreen(viewModel: DownloadViewModel) {
     val context = LocalContext.current
@@ -42,24 +40,17 @@ fun BrowserScreen(viewModel: DownloadViewModel) {
     var webView: WebView? by remember { mutableStateOf(null) }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = { Text("Navegador") },
-            colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-            )
-        )
-
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(8.dp),
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             IconButton(
                 onClick = { webView?.goBack() },
-                enabled = canGoBack
+                enabled = canGoBack,
+                modifier = Modifier.size(40.dp)
             ) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
@@ -71,7 +62,8 @@ fun BrowserScreen(viewModel: DownloadViewModel) {
 
             IconButton(
                 onClick = { webView?.goForward() },
-                enabled = canGoForward
+                enabled = canGoForward,
+                modifier = Modifier.size(40.dp)
             ) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowForward,
@@ -86,22 +78,22 @@ fun BrowserScreen(viewModel: DownloadViewModel) {
                 onValueChange = { url = it },
                 modifier = Modifier
                     .weight(1f)
-                    .height(56.dp),
-                placeholder = { Text("Digite a URL ou pesquise...") },
+                    .height(48.dp),
+                placeholder = { Text("Digite URL ou pesquise...", style = MaterialTheme.typography.bodySmall) },
                 leadingIcon = {
                     if (isLoading) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
+                            modifier = Modifier.size(18.dp),
                             strokeWidth = 2.dp
                         )
                     } else {
-                        Icon(Icons.Default.Search, contentDescription = "Pesquisar")
+                        Icon(Icons.Default.Search, contentDescription = "Pesquisar", modifier = Modifier.size(20.dp))
                     }
                 },
                 trailingIcon = {
                     if (url.isNotEmpty()) {
-                        IconButton(onClick = { url = "" }) {
-                            Icon(Icons.Default.Clear, contentDescription = "Limpar")
+                        IconButton(onClick = { url = "" }, modifier = Modifier.size(36.dp)) {
+                            Icon(Icons.Default.Clear, contentDescription = "Limpar", modifier = Modifier.size(18.dp))
                         }
                     }
                 },
@@ -118,22 +110,25 @@ fun BrowserScreen(viewModel: DownloadViewModel) {
                         webView?.loadUrl(finalUrl)
                     }
                 ),
-                singleLine = true
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyMedium
             )
 
             IconButton(
-                onClick = { webView?.reload() }
+                onClick = { webView?.reload() },
+                modifier = Modifier.size(40.dp)
             ) {
-                Icon(Icons.Default.Refresh, contentDescription = "Recarregar")
+                Icon(Icons.Default.Refresh, contentDescription = "Recarregar", modifier = Modifier.size(20.dp))
             }
 
             IconButton(
                 onClick = {
                     url = "https://www.google.com"
                     webView?.loadUrl("https://www.google.com")
-                }
+                },
+                modifier = Modifier.size(40.dp)
             ) {
-                Icon(Icons.Default.Home, contentDescription = "Início")
+                Icon(Icons.Default.Home, contentDescription = "Início", modifier = Modifier.size(20.dp))
             }
         }
 

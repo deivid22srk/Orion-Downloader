@@ -1,6 +1,7 @@
 package com.orion.downloader.core
 
 import android.content.Context
+import android.util.Log
 import com.orion.downloader.util.StorageHelper
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -24,6 +25,7 @@ class HttpDownloadEngine(private val context: Context) {
     private var shouldCancel = false
     
     private var currentFileInfo: StorageHelper.DownloadFileInfo? = null
+    private var nativeEngine: NativeDownloadEngine? = null
     
     data class DownloadProgress(
         val downloadedBytes: Long,
@@ -47,6 +49,86 @@ class HttpDownloadEngine(private val context: Context) {
     ): Boolean = withContext(Dispatchers.IO) {
         if (isDownloading) return@withContext false
         
+        val isHttps = url.startsWith("https://", ignoreCase = true)
+        val isHttp = url.startsWith("http://", ignoreCase = true)
+        
+        if (!isHttps && !isHttp) {
+            Log.e("HttpDownloadEngine", "URL must start with http:// or https://")
+            return@withContext false
+        }
+        
+        if (!isHttps) {
+            nativeEngine = NativeDownloadEngine()
+            if (nativeEngine?.isNativeAvailable() == true) {
+                Log.i("HttpDownloadEngine", "Using C++ engine for HTTP download")
+                return@withContext startDownloadWithNative(url, filename, numConnections, progressCallback)
+            }
+        }
+        
+        Log.i("HttpDownloadEngine", "Using Kotlin engine for ${if (isHttps) "HTTPS" else "HTTP"} download")
+        return@withContext startDownloadWithKotlin(url, filename, numConnections, progressCallback)
+    }
+    
+    private suspend fun startDownloadWithNative(
+        url: String,
+        filename: String,
+        numConnections: Int,
+        progressCallback: ProgressCallback?
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val mimeType = StorageHelper.getMimeType(filename)
+            val fileInfo = StorageHelper.createDownloadFile(context, filename, mimeType)
+            currentFileInfo = fileInfo
+            
+            if (fileInfo.tempFile == null || nativeEngine == null) {
+                return@withContext false
+            }
+            
+            isDownloading = true
+            
+            val success = nativeEngine!!.startDownload(
+                url = url,
+                outputPath = fileInfo.tempFile.absolutePath,
+                numConnections = numConnections,
+                progressCallback = object : NativeDownloadEngine.ProgressCallback {
+                    override fun onProgress(downloadedBytes: Long, totalBytes: Long, speedBps: Double, activeConnections: Int) {
+                        progressCallback?.onProgress(
+                            DownloadProgress(downloadedBytes, totalBytes, speedBps, activeConnections)
+                        )
+                    }
+                }
+            )
+            
+            if (success) {
+                StorageHelper.finishDownload(context, fileInfo)
+            } else {
+                StorageHelper.cancelDownload(context, fileInfo)
+            }
+            
+            currentFileInfo = null
+            isDownloading = false
+            nativeEngine?.destroy()
+            nativeEngine = null
+            
+            return@withContext success
+            
+        } catch (e: Exception) {
+            Log.e("HttpDownloadEngine", "Native download error", e)
+            currentFileInfo?.let { StorageHelper.cancelDownload(context, it) }
+            currentFileInfo = null
+            isDownloading = false
+            nativeEngine?.destroy()
+            nativeEngine = null
+            return@withContext false
+        }
+    }
+    
+    private suspend fun startDownloadWithKotlin(
+        url: String,
+        filename: String,
+        numConnections: Int,
+        progressCallback: ProgressCallback?
+    ): Boolean = withContext(Dispatchers.IO) {
         try {
             isDownloading = true
             shouldCancel = false
@@ -149,15 +231,18 @@ class HttpDownloadEngine(private val context: Context) {
     
     fun pauseDownload() {
         isPaused = true
+        nativeEngine?.pauseDownload()
     }
     
     fun resumeDownload() {
         isPaused = false
+        nativeEngine?.resumeDownload()
     }
     
     fun cancelDownload() {
         shouldCancel = true
         isPaused = false
+        nativeEngine?.cancelDownload()
         currentFileInfo?.let { 
             try {
                 StorageHelper.cancelDownload(context, it)
