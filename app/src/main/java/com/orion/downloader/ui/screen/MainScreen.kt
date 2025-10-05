@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Language
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -22,15 +23,6 @@ fun MainScreen(
     var showAddDialog by remember { mutableStateOf(false) }
 
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.app_name)) },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-            )
-        },
         floatingActionButton = {
             if (selectedTab == 0) {
                 FloatingActionButton(
@@ -51,10 +43,16 @@ fun MainScreen(
                     onClick = { selectedTab = 0 }
                 )
                 NavigationBarItem(
-                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                    label = { Text(stringResource(R.string.settings)) },
+                    icon = { Icon(Icons.Default.Language, contentDescription = null) },
+                    label = { Text("Navegador") },
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 }
+                )
+                NavigationBarItem(
+                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
+                    label = { Text(stringResource(R.string.settings)) },
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 }
                 )
             }
         }
@@ -62,7 +60,8 @@ fun MainScreen(
         Box(modifier = Modifier.padding(padding)) {
             when (selectedTab) {
                 0 -> DownloadsScreen(viewModel = viewModel)
-                1 -> SettingsScreen(viewModel = viewModel)
+                1 -> BrowserScreen(viewModel = viewModel)
+                2 -> SettingsScreen(viewModel = viewModel)
             }
         }
     }
