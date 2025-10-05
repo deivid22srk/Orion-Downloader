@@ -3,7 +3,7 @@ package com.orion.downloader.viewmodel
 import android.os.Environment
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.orion.downloader.core.DownloadEngine
+import com.orion.downloader.core.HttpDownloadEngine
 import com.orion.downloader.model.DownloadItem
 import com.orion.downloader.model.DownloadStatus
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,7 +26,7 @@ class DownloadViewModel : ViewModel() {
     )
     val downloadPath: StateFlow<String> = _downloadPath.asStateFlow()
 
-    private val downloadEngines = mutableMapOf<String, DownloadEngine>()
+    private val downloadEngines = mutableMapOf<String, HttpDownloadEngine>()
 
     fun addDownload(url: String, filename: String) {
         viewModelScope.launch {
@@ -48,22 +48,38 @@ class DownloadViewModel : ViewModel() {
             
             if (item.status == DownloadStatus.DOWNLOADING) return@launch
 
-            val engine = DownloadEngine()
+            val engine = HttpDownloadEngine()
             downloadEngines[itemId] = engine
-
-            engine.setProgressCallback { downloadedBytes, totalBytes, speedBps, _ ->
-                updateDownloadProgress(itemId, downloadedBytes, totalBytes, speedBps)
-            }
 
             updateDownloadStatus(itemId, DownloadStatus.DOWNLOADING)
 
-            val success = engine.startDownload(item.url, item.outputPath, item.numConnections)
+            val success = engine.startDownload(
+                url = item.url,
+                outputPath = item.outputPath,
+                numConnections = item.numConnections,
+                progressCallback = object : HttpDownloadEngine.ProgressCallback {
+                    override fun onProgress(progress: HttpDownloadEngine.DownloadProgress) {
+                        updateDownloadProgress(
+                            itemId,
+                            progress.downloadedBytes,
+                            progress.totalBytes,
+                            progress.speedBps
+                        )
+                    }
+                }
+            )
             
             if (!success) {
                 updateDownloadStatus(itemId, DownloadStatus.FAILED)
-                downloadEngines.remove(itemId)?.destroy()
+                downloadEngines.remove(itemId)
             } else {
-                checkDownloadCompletion(itemId)
+                val finalItem = _downloads.value.find { it.id == itemId }
+                if (finalItem != null && finalItem.downloadedBytes >= finalItem.totalBytes && finalItem.totalBytes > 0) {
+                    updateDownloadStatus(itemId, DownloadStatus.COMPLETED)
+                } else if (finalItem?.status == DownloadStatus.DOWNLOADING) {
+                    updateDownloadStatus(itemId, DownloadStatus.FAILED)
+                }
+                downloadEngines.remove(itemId)
             }
         }
     }
@@ -86,7 +102,7 @@ class DownloadViewModel : ViewModel() {
         viewModelScope.launch {
             downloadEngines[itemId]?.cancelDownload()
             updateDownloadStatus(itemId, DownloadStatus.CANCELLED)
-            downloadEngines.remove(itemId)?.destroy()
+            downloadEngines.remove(itemId)
         }
     }
 
@@ -138,26 +154,9 @@ class DownloadViewModel : ViewModel() {
         }
     }
 
-    private fun checkDownloadCompletion(itemId: String) {
-        viewModelScope.launch {
-            kotlinx.coroutines.delay(1000)
-            
-            val engine = downloadEngines[itemId]
-            if (engine != null && !engine.isDownloading()) {
-                val item = _downloads.value.find { it.id == itemId }
-                if (item != null && item.downloadedBytes >= item.totalBytes && item.totalBytes > 0) {
-                    updateDownloadStatus(itemId, DownloadStatus.COMPLETED)
-                }
-                downloadEngines.remove(itemId)?.destroy()
-            } else if (engine != null && engine.isDownloading()) {
-                checkDownloadCompletion(itemId)
-            }
-        }
-    }
-
     override fun onCleared() {
         super.onCleared()
-        downloadEngines.values.forEach { it.destroy() }
+        downloadEngines.values.forEach { it.cancelDownload() }
         downloadEngines.clear()
     }
 }

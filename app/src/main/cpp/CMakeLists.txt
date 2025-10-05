@@ -10,18 +10,11 @@ set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -fvisibilit
 add_library(
     orion_downloader
     SHARED
-    download_engine.cpp
     jni_bridge.cpp
 )
-
-find_library(ssl-lib ssl)
-find_library(crypto-lib crypto)
 
 target_link_libraries(
     orion_downloader
     android
     log
-    z
-    ${ssl-lib}
-    ${crypto-lib}
 )
