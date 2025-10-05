@@ -1,6 +1,10 @@
 package com.orion.downloader.core
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
@@ -10,8 +14,11 @@ import kotlin.math.min
 
 class HttpDownloadEngine {
     
+    @Volatile
     private var isDownloading = false
+    @Volatile
     private var isPaused = false
+    @Volatile
     private var shouldCancel = false
     
     data class DownloadProgress(
@@ -24,7 +31,7 @@ class HttpDownloadEngine {
             get() = if (totalBytes > 0) (downloadedBytes.toFloat() / totalBytes.toFloat()) * 100f else 0f
     }
     
-    interface ProgressCallback {
+    fun interface ProgressCallback {
         fun onProgress(progress: DownloadProgress)
     }
     
@@ -64,45 +71,44 @@ class HttpDownloadEngine {
                 raf.setLength(contentLength)
             }
             
-            val chunks = mutableListOf<ChunkDownloader>()
             val startTime = System.currentTimeMillis()
-            var totalDownloaded = 0L
+            @Volatile var totalDownloaded = 0L
             
-            for (i in 0 until actualConnections) {
-                val start = i * chunkSize
-                val end = if (i == actualConnections - 1) contentLength - 1 else start + chunkSize - 1
+            coroutineScope {
+                val jobs = (0 until actualConnections).map { i ->
+                    async {
+                        val start = i * chunkSize
+                        val end = if (i == actualConnections - 1) contentLength - 1 else start + chunkSize - 1
+                        
+                        downloadChunk(
+                            url = url,
+                            outputFile = outputFile,
+                            start = start,
+                            end = end,
+                            onProgress = { downloaded ->
+                                if (!isPaused && !shouldCancel) {
+                                    synchronized(this@HttpDownloadEngine) {
+                                        totalDownloaded += downloaded
+                                    }
+                                    val elapsed = (System.currentTimeMillis() - startTime) / 1000.0
+                                    val speed = if (elapsed > 0) totalDownloaded / elapsed else 0.0
+                                    
+                                    progressCallback?.onProgress(
+                                        DownloadProgress(
+                                            downloadedBytes = totalDownloaded,
+                                            totalBytes = contentLength,
+                                            speedBps = speed,
+                                            activeConnections = actualConnections
+                                        )
+                                    )
+                                }
+                            }
+                        )
+                    }
+                }
                 
-                val chunk = ChunkDownloader(
-                    url = url,
-                    outputFile = outputFile,
-                    start = start,
-                    end = end,
-                    onProgress = { downloaded ->
-                        if (!isPaused && !shouldCancel) {
-                            totalDownloaded += downloaded
-                            val elapsed = (System.currentTimeMillis() - startTime) / 1000.0
-                            val speed = if (elapsed > 0) totalDownloaded / elapsed else 0.0
-                            
-                            progressCallback?.onProgress(
-                                DownloadProgress(
-                                    downloadedBytes = totalDownloaded,
-                                    totalBytes = contentLength,
-                                    speedBps = speed,
-                                    activeConnections = actualConnections
-                                )
-                            )
-                        }
-                    },
-                    checkPaused = { isPaused },
-                    checkCancel = { shouldCancel }
-                )
-                
-                chunks.add(chunk)
+                jobs.awaitAll()
             }
-            
-            chunks.map { chunk ->
-                kotlinx.coroutines.async { chunk.download() }
-            }.forEach { it.await() }
             
             isDownloading = false
             return@withContext !shouldCancel
@@ -130,52 +136,46 @@ class HttpDownloadEngine {
     fun isDownloading() = isDownloading
     fun isPaused() = isPaused
     
-    private class ChunkDownloader(
-        private val url: String,
-        private val outputFile: File,
-        private val start: Long,
-        private val end: Long,
-        private val onProgress: (Long) -> Unit,
-        private val checkPaused: () -> Boolean,
-        private val checkCancel: () -> Boolean
-    ) {
-        suspend fun download() = withContext(Dispatchers.IO) {
-            try {
-                val connection = URL(url).openConnection() as HttpURLConnection
-                connection.requestMethod = "GET"
-                connection.setRequestProperty("Range", "bytes=$start-$end")
-                connection.connectTimeout = 10000
-                connection.readTimeout = 30000
-                connection.connect()
-                
-                val inputStream = connection.inputStream
-                val raf = RandomAccessFile(outputFile, "rw")
-                raf.seek(start)
-                
-                val buffer = ByteArray(8192)
-                var bytesRead: Int
-                var totalRead = 0L
-                
-                while (!checkCancel()) {
-                    while (checkPaused() && !checkCancel()) {
-                        Thread.sleep(100)
-                    }
-                    
-                    bytesRead = inputStream.read(buffer)
-                    if (bytesRead == -1) break
-                    
-                    raf.write(buffer, 0, bytesRead)
-                    totalRead += bytesRead
-                    onProgress(bytesRead.toLong())
+    private suspend fun downloadChunk(
+        url: String,
+        outputFile: File,
+        start: Long,
+        end: Long,
+        onProgress: (Long) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        try {
+            val connection = URL(url).openConnection() as HttpURLConnection
+            connection.requestMethod = "GET"
+            connection.setRequestProperty("Range", "bytes=$start-$end")
+            connection.connectTimeout = 10000
+            connection.readTimeout = 30000
+            connection.connect()
+            
+            val inputStream = connection.inputStream
+            val raf = RandomAccessFile(outputFile, "rw")
+            raf.seek(start)
+            
+            val buffer = ByteArray(8192)
+            var bytesRead: Int
+            
+            while (!shouldCancel) {
+                while (isPaused && !shouldCancel) {
+                    delay(100)
                 }
                 
-                raf.close()
-                inputStream.close()
-                connection.disconnect()
+                bytesRead = inputStream.read(buffer)
+                if (bytesRead == -1) break
                 
-            } catch (e: Exception) {
-                e.printStackTrace()
+                raf.write(buffer, 0, bytesRead)
+                onProgress(bytesRead.toLong())
             }
+            
+            raf.close()
+            inputStream.close()
+            connection.disconnect()
+            
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
     }
 }
