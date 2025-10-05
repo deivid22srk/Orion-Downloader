@@ -72,7 +72,7 @@ class HttpDownloadEngine {
             }
             
             val startTime = System.currentTimeMillis()
-            @Volatile var totalDownloaded = 0L
+            val totalDownloaded = java.util.concurrent.atomic.AtomicLong(0L)
             
             coroutineScope {
                 val jobs = (0 until actualConnections).map { i ->
@@ -87,15 +87,13 @@ class HttpDownloadEngine {
                             end = end,
                             onProgress = { downloaded ->
                                 if (!isPaused && !shouldCancel) {
-                                    synchronized(this@HttpDownloadEngine) {
-                                        totalDownloaded += downloaded
-                                    }
+                                    val total = totalDownloaded.addAndGet(downloaded)
                                     val elapsed = (System.currentTimeMillis() - startTime) / 1000.0
-                                    val speed = if (elapsed > 0) totalDownloaded / elapsed else 0.0
+                                    val speed = if (elapsed > 0) total / elapsed else 0.0
                                     
                                     progressCallback?.onProgress(
                                         DownloadProgress(
-                                            downloadedBytes = totalDownloaded,
+                                            downloadedBytes = total,
                                             totalBytes = contentLength,
                                             speedBps = speed,
                                             activeConnections = actualConnections
