@@ -1,34 +1,44 @@
 # Orion Downloader
 
-High-performance download manager for Android with C++ engine for maximum speed.
+High-performance download manager for Android with hybrid Kotlin/C++ architecture and foreground service support.
 
 ## Features
 
-- 🚀 **High-Speed Downloads**: C++ engine with multi-threaded download support (up to 16 connections)
-- 🎨 **Material You Design**: Modern UI with Material Design 3 and Dynamic Colors
-- ⚡ **Efficient**: Optimized C++ code with `-O3` and fast-math optimizations
-- 📊 **Real-time Progress**: Live download speed and progress tracking
+- 🚀 **High-Speed Downloads**: Multi-threaded download engine with up to 16 parallel connections
+- 🔐 **HTTP/HTTPS Support**: Full support for secure HTTPS downloads using Android's native SSL
+- 🎨 **Material You Design**: Modern UI with Material Design 3 (v1.3.1) and Dynamic Colors
+- ⚡ **Efficient**: Optimized Kotlin coroutines with thread-safe operations
+- 📊 **Real-time Progress**: Live download speed, progress tracking, and notifications
+- 🔔 **Background Downloads**: Foreground service with persistent notifications
 - 🔄 **Pause/Resume**: Full control over your downloads
 - 🎯 **Range Requests**: Automatic detection and use of parallel downloads when supported
 
 ## Architecture
 
-### C++ Engine (`download_engine.cpp`)
-- Multi-threaded download with configurable connections
-- Socket-level implementation for maximum performance
+### Hybrid Kotlin/C++ Approach
+- **Kotlin** for HTTP/HTTPS connections using `HttpURLConnection` (native Android SSL support)
+- **C++ (JNI)** available for future low-level optimizations
+- **Coroutines** for asynchronous operations and parallel downloads
+- **Foreground Service** for reliable background downloads
+
+### Download Engine (`HttpDownloadEngine.kt`)
+- Multi-threaded downloads with configurable connections
 - Range request support for parallel chunk downloads
-- Optimized with `-O3`, `-ffast-math`, and pthread
+- AtomicLong for thread-safe progress tracking
+- Real-time speed calculation
+- Pause/Resume/Cancel functionality
 
-### Kotlin Layer
-- Modern MVVM architecture with Jetpack Compose
-- Clean separation between UI and business logic
-- Coroutines for asynchronous operations
-- StateFlow for reactive UI updates
+### Foreground Service (`DownloadService.kt`)
+- Persistent notifications with progress updates
+- Survives app backgrounding
+- Automatic cleanup when downloads complete
+- Multiple simultaneous downloads supported
 
-### JNI Bridge
-- Efficient C++ ↔ Kotlin communication
-- Progress callbacks from native code
-- Thread-safe operations
+### UI Layer
+- MVVM architecture with StateFlow
+- Jetpack Compose with Material3
+- Dynamic color theming (Android 12+)
+- Reactive UI updates
 
 ## Technical Details
 
@@ -37,13 +47,13 @@ High-performance download manager for Android with C++ engine for maximum speed.
 - **Language**: Kotlin 2.1.0 + C++17
 - **UI Framework**: Jetpack Compose with Material3 1.3.1
 - **Build System**: Gradle 8.9 with CMake 3.22.1
-- **NDK**: Android NDK with C++ shared STL
+- **Concurrency**: Kotlin Coroutines 1.10.1
 
 ## Building
 
 ### Prerequisites
 - Android Studio Ladybug or later
-- NDK installed
+- Android NDK (automatically installed)
 - JDK 17
 
 ### Build Commands
@@ -58,31 +68,75 @@ High-performance download manager for Android with C++ engine for maximum speed.
 
 ### CI/CD
 
-The project includes GitHub Actions workflow that:
+GitHub Actions workflow automatically:
 - Builds both debug and release APKs
 - Runs on push to main and pull requests
-- Uploads artifacts for easy download
+- Uploads artifacts for download
 
 ## Permissions
 
+### Required
 - `INTERNET` - For downloading files
-- `ACCESS_NETWORK_STATE` - To check network connectivity
-- `WRITE_EXTERNAL_STORAGE` - For Android 9 and below
-- `READ_MEDIA_*` - For Android 13 and above
-- `POST_NOTIFICATIONS` - For download notifications (Android 13+)
+- `ACCESS_NETWORK_STATE` - Network connectivity detection
+- `FOREGROUND_SERVICE` - Background downloads
+- `FOREGROUND_SERVICE_DATA_SYNC` - Data sync service type (Android 14+)
 
-## Performance
+### Storage (API level dependent)
+- `WRITE_EXTERNAL_STORAGE` - Android 9 and below
+- `READ_MEDIA_*` - Android 13 and above
 
-The C++ engine is optimized for maximum speed:
-- Direct socket operations (no high-level HTTP libraries)
-- Parallel chunk downloads when server supports range requests
-- Buffer size optimized at 64KB
-- TCP_NODELAY enabled for reduced latency
-- Compiler optimizations: `-O3 -ffast-math`
+### Optional
+- `POST_NOTIFICATIONS` - Download notifications (Android 13+)
+- `WAKE_LOCK` - Prevent sleep during downloads
+
+## Features in Detail
+
+### Parallel Downloads
+Configure 1-16 parallel connections per download:
+- Automatically detects if server supports range requests
+- Falls back to single connection if ranges not supported
+- Each connection downloads a chunk independently
+- Chunks are merged seamlessly into final file
+
+### Background Downloads
+- Downloads continue when app is minimized
+- Persistent notification shows progress
+- Completion notifications with auto-dismiss
+- Service automatically stops when all downloads complete
+
+### Progress Tracking
+- Real-time bytes downloaded
+- Live speed calculation (MB/s)
+- Percentage completion
+- Active connection count
 
 ## Screenshots
 
 *Coming soon*
+
+## Performance
+
+Optimized for maximum speed:
+- Parallel chunk downloads using Kotlin coroutines
+- 8KB buffer size per connection
+- AtomicLong for lock-free progress updates
+- Native Android HTTPS (no overhead from custom SSL)
+- Automatic connection pooling
+
+## Known Limitations
+
+- Download resume after app restart not yet implemented (coming soon)
+- No download queue management (all start immediately)
+- No bandwidth limiting options
+
+## Future Enhancements
+
+- [ ] SQLite persistence for download history
+- [ ] Resume downloads after app restart
+- [ ] Download queue with priority
+- [ ] Bandwidth limiting
+- [ ] Scheduled downloads
+- [ ] Wi-Fi only mode
 
 ## License
 

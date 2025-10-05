@@ -11,6 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -38,6 +39,14 @@ class MainActivity : ComponentActivity() {
                     color = MaterialTheme.colorScheme.background
                 ) {
                     val viewModel: DownloadViewModel = viewModel()
+                    
+                    DisposableEffect(Unit) {
+                        viewModel.bindService()
+                        onDispose {
+                            viewModel.unbindService()
+                        }
+                    }
+                    
                     MainScreen(viewModel = viewModel)
                 }
             }
